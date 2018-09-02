@@ -25,7 +25,7 @@ void app_main(void)
 	fflush(stdout);
 
 	xTaskCreate(&touch_task, "touch_pad_read_task", 2048, NULL, 5, NULL);
-	//xTaskCreate(&led_task, "led_task", 2048, NULL, 1, NULL);
+	xTaskCreate(&led_task, "led_task", 2048, NULL, 1, NULL);
 	initialise_wifi();
 	xTaskCreate(&tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
 

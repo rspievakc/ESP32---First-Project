@@ -7,11 +7,13 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "driver/ledc.h"
 #include "esp_err.h"
 #include "esp_log.h"
 
 #include "led.h"
+#include "gamma.h"
 
 /*
  * About this example
@@ -49,12 +51,34 @@
 #define LEDC_LS_CH3_CHANNEL    LEDC_CHANNEL_3
 
 #define LEDC_TEST_CH_NUM       (4)
-#define LEDC_TEST_DUTY         (4000)
-#define LEDC_TEST_FADE_TIME    (3000)
+#define LEDC_TEST_DUTY         (8191)
+#define LEDC_TEST_FADE_TIME    (6000)
+
+static const char* TAG = "LED PWM";
+QueueHandle_t led_queue;
+
+void led_turn_on(void) {
+
+}
+
+void led_turn_off(void) {
+
+}
+
+void led_fade(uint8_t direction, uint8_t startValue, uint8_t endValue, uint8_t delay) {
+
+}
 
 void led_task(void *pvParameters)
 {
-    int ch;
+    int ch = 3;
+
+    led_queue = xQueueCreate( 10, sizeof( led_command ) );
+	if (led_queue == NULL) {
+		ESP_LOGE(TAG, "Error creating the LED queue.");
+		vTaskDelete(NULL);
+		return;
+	}
 
     /*
      * Prepare and set configuration of timers
@@ -111,7 +135,7 @@ void led_task(void *pvParameters)
         },
         {
             .channel    = LEDC_LS_CH3_CHANNEL,
-            .duty       = 0,
+            .duty       = 8191,
             .gpio_num   = LEDC_LS_CH3_GPIO,
             .speed_mode = LEDC_LS_MODE,
             .timer_sel  = LEDC_LS_TIMER
@@ -126,37 +150,59 @@ void led_task(void *pvParameters)
     // Initialize fade service.
     ledc_fade_func_install(0);
 
+    led_command command;
+	uint8_t loop=0;
+	int8_t direction=0;
+	uint32_t current = 0;
+
     while (1) {
-        printf("1. LEDC fade up to duty = %d\n", LEDC_TEST_DUTY);
-        for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
-            ledc_set_fade_with_time(ledc_channel[ch].speed_mode,
-                    ledc_channel[ch].channel, LEDC_TEST_DUTY, LEDC_TEST_FADE_TIME);
-            ledc_fade_start(ledc_channel[ch].speed_mode,
-                    ledc_channel[ch].channel, LEDC_FADE_NO_WAIT);
-        }
-        vTaskDelay(LEDC_TEST_FADE_TIME / portTICK_PERIOD_MS);
+    	ch = 3;
 
-        printf("2. LEDC fade down to duty = 0\n");
-        for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
-            ledc_set_fade_with_time(ledc_channel[ch].speed_mode,
-                    ledc_channel[ch].channel, 0, LEDC_TEST_FADE_TIME);
-            ledc_fade_start(ledc_channel[ch].speed_mode,
-                    ledc_channel[ch].channel, LEDC_FADE_NO_WAIT);
-        }
-        vTaskDelay(LEDC_TEST_FADE_TIME / portTICK_PERIOD_MS);
+    	if (xQueueReceive(led_queue, &command, loop ? 0 : portMAX_DELAY) == pdTRUE) {
+    		if (command.start == 0xFF && command.end == 0xFF) { // Stop fade loop
+    			loop = 0;
+    			ESP_LOGI(TAG, "Stopping fade loop.\n");
+			} else if(command.start == command.end) { // Set value
 
-        printf("3. LEDC set duty = %d without fade\n", LEDC_TEST_DUTY);
-        for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
-            ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, LEDC_TEST_DUTY);
-            ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
-        }
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+				if (command.start > GAMA_TABLE_SIZE-1) {
+					command.start = GAMA_TABLE_SIZE-1;
+				}
 
-        printf("4. LEDC set duty = 0 without fade\n");
-        for (ch = 0; ch < LEDC_TEST_CH_NUM; ch++) {
-            ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, 0);
-            ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
-        }
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+				if (command.end > GAMA_TABLE_SIZE-1) {
+					command.end = GAMA_TABLE_SIZE-1;
+				}
+
+    			current = command.start;
+    			ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, gamma_table[current]);
+				ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+				ESP_LOGI(TAG, "Setting led power to %d%%\n", current);
+				loop = 0;
+			} else if(command.start != command.end) { // Start fade
+				if (command.start == 0xFF) {
+					command.start = current;
+				}
+				if (command.end == 0xFF) {
+					command.end = current;
+				}
+				direction = command.end > command.start ? 1 : -1;
+				current = command.start;
+				loop = 1;
+				ESP_LOGI(TAG, "Starting fade loop. Parameters: [ start=%d, end=%d, step=%d, delay=%d ] - direction: %d\n",
+				command.start, command.end, command.step, command.delay, direction);
+			}
+    	}
+    	if (loop) {
+    		ledc_set_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel, gamma_table[current]);
+    		ledc_update_duty(ledc_channel[ch].speed_mode, ledc_channel[ch].channel);
+    		ESP_LOGI(TAG, "Fading step. Parameters: [ start=%d, end=%d, step=%d, delay=%d ] - direction: %d - value=%d\n",
+    								command.start, command.end, command.step, command.delay, direction, current);
+    		if ((direction == -1 && current <= command.end) || (direction == 1 && current >= command.end)) {
+    			loop = 0;
+    			continue;
+    		} else {
+    			current += (command.step * (direction ? -1 : 1));
+    			vTaskDelay(command.delay / portTICK_RATE_MS);
+    		}
+    	}
     }
 }
